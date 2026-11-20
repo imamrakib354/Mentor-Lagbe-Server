@@ -35,6 +35,34 @@ app.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
+// Users related api
+
+app.get("/users", async (req, res) => {
+  const cursor = users.find({});
+  const result = await cursor.toArray();
+  res.send(result);
+});
+
+// Users related api
+
+app.get("/users", async (req, res) => {
+  const cursor = users.find({});
+  const result = await cursor.toArray();
+  res.send(result);
+});
+
+// tuitions related api
+app.post("/tuitions", async (req, res) => {
+  const tuition= req.body;
+  const result = await tuitions.insertOne(tuition);
+  res.send(result);
+});
+
+app.get("/tuitions", async (req, res) => {
+  const result = await tuitions.find().toArray();
+  res.send(result);
+});
+
 if (!process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`Server is running at http://localhost:${port}`);
