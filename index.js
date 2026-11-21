@@ -30,6 +30,8 @@ const users = database.collection("user");
 const tuitions = database.collection("tuitions");
 const applications = database.collection("applications");
 const payments = database.collection("payments");
+const savedTuitions = database.collection("savedTuitions")
+
 
 app.get("/", (req, res) => {
   res.send("Hello World!");
@@ -247,6 +249,29 @@ await applications.createIndex(
   { unique: true }
 )
 
+await savedTuitions.createIndex(
+  { studentId: 1, tuitionId: 1 },
+  { unique: true }
+)
+
+async function getApplicationCounts(query) {
+  return {
+    all: await applications.countDocuments(query),
+    pending: await applications.countDocuments({
+      ...query,
+      status: "pending",
+    }),
+    accepted: await applications.countDocuments({
+      ...query,
+      status: "accepted",
+    }),
+    rejected: await applications.countDocuments({
+      ...query,
+      status: "rejected",
+    }),
+  }
+}
+
 app.post("/applications", async (req, res) => {
   try {
     const application = req.body
@@ -268,12 +293,42 @@ app.post("/applications", async (req, res) => {
 
 app.get("/applications/student/:applicantId", async (req, res) => {
   try {
+    const query = {
+      applicantId: req.params.applicantId,
+    }
+
+    const search = String(req.query.search || "").trim()
+
+    if (search) {
+      const escapedSearch = search.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        "\\$&"
+      )
+
+      query.$or = [
+        { tuitionTitle: { $regex: escapedSearch, $options: "i" } },
+        { subject: { $regex: escapedSearch, $options: "i" } },
+        { tutorName: { $regex: escapedSearch, $options: "i" } },
+        { tutorEmail: { $regex: escapedSearch, $options: "i" } },
+      ]
+    }
+
+    // Count across all statuses before adding the selected status.
+    const counts = await getApplicationCounts(query)
+
+    if (["pending", "accepted", "rejected"].includes(req.query.status)) {
+      query.status = req.query.status
+    }
+
     const result = await applications
-      .find({ applicantId: req.params.applicantId })
+      .find(query)
       .sort({ createdAt: -1 })
       .toArray()
 
-    res.json(result)
+    res.json({
+      applications: result,
+      counts,
+    })
   } catch (error) {
     console.error(error)
     res.status(500).json({
@@ -288,6 +343,24 @@ app.get("/applications/tutor/:tutorId", async (req, res) => {
       tutorId: req.params.tutorId,
     }
 
+    const search = String(req.query.search || "").trim()
+
+    if (search) {
+      const escapedSearch = search.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        "\\$&"
+      )
+
+      query.$or = [
+        { applicantName: { $regex: escapedSearch, $options: "i" } },
+        { applicantEmail: { $regex: escapedSearch, $options: "i" } },
+        { tuitionTitle: { $regex: escapedSearch, $options: "i" } },
+        { subject: { $regex: escapedSearch, $options: "i" } },
+      ]
+    }
+
+    const counts = await getApplicationCounts(query)
+
     if (["pending", "accepted", "rejected"].includes(req.query.status)) {
       query.status = req.query.status
     }
@@ -297,7 +370,10 @@ app.get("/applications/tutor/:tutorId", async (req, res) => {
       .sort({ createdAt: -1 })
       .toArray()
 
-    res.json(result)
+    res.json({
+      applications: result,
+      counts,
+    })
   } catch (error) {
     console.error(error)
     res.status(500).json({
@@ -326,6 +402,90 @@ app.patch("/applications/:id/status", async (req, res) => {
     console.error(error)
     res.status(500).json({
       message: "Failed to update application status.",
+    })
+  }
+})
+
+
+// Saved tuitions api route 
+app.post("/saved-tuitions", async (req, res) => {
+  try {
+    const { studentId, tuitionId } = req.body
+
+    if (
+      typeof studentId !== "string" ||
+      !studentId.trim() ||
+      typeof tuitionId !== "string" ||
+      !ObjectId.isValid(tuitionId)
+    ) {
+      return res.status(400).json({
+        message: "Student ID and valid tuition ID are required.",
+      })
+    }
+
+    const normalizedTuitionId = new ObjectId(tuitionId).toString()
+
+    const result = await savedTuitions.updateOne(
+      {
+        studentId,
+        tuitionId: normalizedTuitionId,
+      },
+      {
+        $setOnInsert: {
+          createdAt: new Date().toISOString(),
+        },
+      },
+      { upsert: true }
+    )
+
+    res.json({
+      saved: true,
+      alreadySaved: result.upsertedCount === 0,
+    })
+  } catch (error) {
+    // Handles two simultaneous requests for the same bookmark.
+    if (error.code === 11000) {
+      return res.json({
+        saved: true,
+        alreadySaved: true,
+      })
+    }
+
+    console.error(error)
+    res.status(500).json({
+      message: "Failed to save tuition.",
+    })
+  }
+})
+
+app.get("/saved-tuitions/student/:studentId", async (req, res) => {
+  try {
+    const bookmarks = await savedTuitions
+      .find({ studentId: req.params.studentId })
+      .sort({ createdAt: -1 })
+      .toArray()
+
+    const tuitionIds = bookmarks.map(
+      (bookmark) => new ObjectId(bookmark.tuitionId)
+    )
+
+    const tuitionRecords = await tuitions
+      .find({ _id: { $in: tuitionIds } })
+      .toArray()
+
+    const result = bookmarks.map((bookmark) => ({
+      ...bookmark,
+      tuition:
+        tuitionRecords.find(
+          (tuition) => tuition._id.toString() === bookmark.tuitionId
+        ) || null,
+    }))
+
+    res.json(result)
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({
+      message: "Failed to load saved tuitions.",
     })
   }
 })
