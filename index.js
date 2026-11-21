@@ -144,6 +144,47 @@ app.get("/tuitions/tutor/:tutorId", async (req, res) => {
   }
 })
 
+// applications related api 
+await applications.createIndex(
+  { tuitionId: 1, applicantId: 1 },
+  { unique: true }
+)
+
+app.post("/applications", async (req, res) => {
+  try {
+    const application = req.body
+    const result = await applications.insertOne(application)
+
+    res.send(result)
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).send({
+        message: "You have already applied for this tuition.",
+      })
+    }
+
+    res.status(500).send({
+      message: "Failed to submit application.",
+    })
+  }
+})
+
+app.get("/applications/student/:applicantId", async (req, res) => {
+  try {
+    const result = await applications
+      .find({ applicantId: req.params.applicantId })
+      .sort({ createdAt: -1 })
+      .toArray()
+
+    res.json(result)
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({
+      message: "Failed to load your applications.",
+    })
+  }
+})
+
 
 if (!process.env.VERCEL) {
   app.listen(port, () => {
