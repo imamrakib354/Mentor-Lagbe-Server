@@ -128,6 +128,23 @@ app.get("/tuitions/:id", async (req, res) => {
   res.send(result);
 });
 
+app.get("/tuitions/tutor/:tutorId", async (req, res) => {
+  try {
+    const result = await tuitions
+      .find({ tutorId: req.params.tutorId })
+      .sort({ createdAt: -1 })
+      .toArray()
+
+    res.json(result)
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({
+      message: "Failed to load tutor tuitions.",
+    })
+  }
+})
+
+
 if (!process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`Server is running at http://localhost:${port}`);
