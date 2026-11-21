@@ -53,15 +53,72 @@ app.get("/users", async (req, res) => {
 
 // tuitions related api
 app.post("/tuitions", async (req, res) => {
-  const tuition= req.body;
+  const tuition = req.body;
   const result = await tuitions.insertOne(tuition);
   res.send(result);
 });
 
+const PAGE_SIZE = 6
+
 app.get("/tuitions", async (req, res) => {
-  const result = await tuitions.find().toArray();
-  res.send(result);
-});
+  try {
+    const {
+      search = "",
+      subject = "",
+      classLevel = "",
+      mode = "",
+      sort = "newest",
+    } = req.query
+
+    const requestedPage = Math.max(Number(req.query.page) || 1, 1)
+
+    // Public listings must always be approved and active.
+    const query = {
+      approvalStatus: "approved",
+      isActive: true,
+    }
+
+    if (subject) query.subject = String(subject)
+    if (classLevel) query.classLevel = String(classLevel)
+
+    if (mode === "Online" || mode === "Offline") {
+      query.mode = mode
+    }
+
+    if (search.trim()) {
+      const escapedSearch = String(search)
+        .trim()
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+
+      query.$or = [
+        { title: { $regex: escapedSearch, $options: "i" } },
+        { subject: { $regex: escapedSearch, $options: "i" } },
+      ]
+    }
+
+    const total = await tuitions.countDocuments(query)
+    const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+    const page = Math.min(requestedPage, totalPages)
+
+    const result = await tuitions
+      .find(query)
+      .sort({ createdAt: sort === "oldest" ? 1 : -1 })
+      .skip((page - 1) * PAGE_SIZE)
+      .limit(PAGE_SIZE)
+      .toArray()
+
+    res.json({
+      tuitions: result,
+      total,
+      page,
+      pageSize: PAGE_SIZE,
+      totalPages,
+    })
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: "Failed to load tuitions." })
+  }
+})
 
 if (!process.env.VERCEL) {
   app.listen(port, () => {
