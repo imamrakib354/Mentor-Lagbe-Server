@@ -52,15 +52,15 @@ app.get("/users", async (req, res) => {
 });
 
 app.patch('/users/:id/role', async (req, res) => {
-    const id = req.params.id;
-    const query = { _id: new ObjectId(id) };
-    const updatedDoc = {
-        $set: {
-            role: req.body.role,
-        }
+  const id = req.params.id;
+  const query = { _id: new ObjectId(id) };
+  const updatedDoc = {
+    $set: {
+      role: req.body.role,
     }
-    const result = await users.updateOne(query, updatedDoc);
-    res.send(result);
+  }
+  const result = await users.updateOne(query, updatedDoc);
+  res.send(result);
 })
 
 // tuitions related api
@@ -156,6 +156,91 @@ app.get("/tuitions/tutor/:tutorId", async (req, res) => {
   }
 })
 
+app.patch("/tuitions/:id/active", async (req, res) => {
+  try {
+    const result = await tuitions.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { isActive: req.body.isActive } }
+    )
+
+    res.send(result)
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to update tuition availability.",
+    })
+  }
+})
+
+
+app.patch("/tuitions/:id", async (req, res) => {
+  try {
+    const { role, approvalStatus } = req.body;
+
+    // Check admin
+    if (role !== "admin") {
+      return res.status(403).send({
+        message: "Only admin can update tuition status.",
+      });
+    }
+
+    const id = req.params.id;
+    const query = { _id: new ObjectId(id) };
+
+    const updatedDoc = {
+      $set: {
+        approvalStatus: approvalStatus,
+      },
+    };
+
+    const result = await tuitions.updateOne(query, updatedDoc);
+
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to update tuition status.",
+    });
+  }
+});
+
+// Get api for admin filtering 
+
+app.get("/admin/tuitions", async (req, res) => {
+  try {
+    const {
+      classLevel = "",
+      subject = "",
+      mode = "",
+      sort = "newest",
+      approvalStatus = "",
+    } = req.query
+
+    const query = {}
+
+    if (classLevel) query.classLevel = String(classLevel)
+    if (subject) query.subject = String(subject)
+
+    if (mode === "Online" || mode === "Offline") {
+      query.mode = mode
+    }
+
+    if (["pending", "approved", "rejected"].includes(approvalStatus)) {
+      query.approvalStatus = approvalStatus
+    }
+
+    const result = await tuitions
+      .find(query)
+      .sort({ createdAt: sort === "oldest" ? 1 : -1 })
+      .toArray()
+
+    res.json(result)
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({
+      message: "Failed to load admin tuitions.",
+    })
+  }
+})
+
 // applications related api 
 await applications.createIndex(
   { tuitionId: 1, applicantId: 1 },
@@ -193,6 +278,54 @@ app.get("/applications/student/:applicantId", async (req, res) => {
     console.error(error)
     res.status(500).json({
       message: "Failed to load your applications.",
+    })
+  }
+})
+
+app.get("/applications/tutor/:tutorId", async (req, res) => {
+  try {
+    const query = {
+      tutorId: req.params.tutorId,
+    }
+
+    if (["pending", "accepted", "rejected"].includes(req.query.status)) {
+      query.status = req.query.status
+    }
+
+    const result = await applications
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray()
+
+    res.json(result)
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({
+      message: "Failed to load applicants.",
+    })
+  }
+})
+
+app.patch("/applications/:id/status", async (req, res) => {
+  try {
+    const { status } = req.body
+
+    if (status !== "accepted" && status !== "rejected") {
+      return res.status(400).json({
+        message: "Select accepted or rejected.",
+      })
+    }
+
+    const result = await applications.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { status } }
+    )
+
+    res.json(result)
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({
+      message: "Failed to update application status.",
     })
   }
 })
