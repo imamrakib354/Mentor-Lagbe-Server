@@ -120,6 +120,14 @@ app.get("/tuitions", async (req, res) => {
   }
 })
 
+app.get("/tuitions/:id", async (req, res) => {
+  const { id } = req.params;
+  const result = await tuitions.findOne({
+    _id: new ObjectId(id),
+  });
+  res.send(result);
+});
+
 if (!process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`Server is running at http://localhost:${port}`);
