@@ -70,6 +70,34 @@ app.get("/users/:id/premium", async (req, res) => {
   res.send({ premium: user.premium === true })
 })
 
+// Update the user profile
+
+app.patch("/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, phone, bio, image } = req.body;
+
+    const query = { _id: new ObjectId(id) };
+
+    const updatedDoc = {
+      $set: {
+        name,
+        phone,
+        bio,
+        image,
+      },
+    };
+
+    const result = await users.updateOne(query, updatedDoc);
+
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to update profile",
+    });
+  }
+});
+
 // PATCH /users/:id/role: Updates the role of a user by ID.
 app.patch('/users/:id/role', async (req, res) => {
   const id = req.params.id;
