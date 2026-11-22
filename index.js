@@ -3,6 +3,16 @@ import cors from "cors";
 import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
 import Stripe from 'stripe';
+import { createRemoteJWKSet, jwtVerify } from "jose";
+
+// The URL where your Next.js BetterAuth server runs
+const authURL = process.env.BETTER_AUTH_URL;
+const authOrigin = new URL(authURL).origin;
+
+// Create the public-key verifier once
+const JWKS = createRemoteJWKSet(
+  new URL("/api/auth/jwks", authOrigin)
+);
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
 
@@ -41,17 +51,133 @@ app.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
+//First verify the token
+
+const verifyToken = async (req, res, next) => {
+  try {
+    // 1. Get token from Authorization header
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader?.startsWith("Bearer ")) {
+      return res.status(401).send({
+        message: "Unauthorized",
+      });
+    }
+
+    const token = authHeader.split(" ")[1];
+
+    if (!token) {
+      return res.status(401).send({
+        message: "Unauthorized",
+      });
+    }
+
+    // 2. Verify the JWT
+    const { payload } = await jwtVerify(token, JWKS, {
+      issuer: authOrigin,
+      audience: authOrigin,
+    });
+
+    // 3. Get the verified user's ID
+    const userId = payload.sub;
+
+    if (!userId || !ObjectId.isValid(userId)) {
+      return res.status(401).send({
+        message: "Invalid user identity",
+      });
+    }
+
+    // 4. Find the current user in MongoDB
+    const user = await users.findOne({
+      _id: new ObjectId(userId),
+    });
+
+    if (!user) {
+      return res.status(401).send({
+        message: "User not found",
+      });
+    }
+
+    if (user.banned === true) {
+      return res.status(403).send({
+        message: "Your account has been suspended",
+      });
+    }
+
+    // 5. Attach the verified user to Express request
+    req.user = user;
+
+    // 6. Continue to the next middleware
+    next();
+  } catch (error) {
+    console.error("JWT verification failed:", error);
+
+    return res.status(401).send({
+      message: "Invalid or expired JWT",
+    });
+  }
+};
+
+
+// must call this middleware after verifyToken
+const verifyStudent = async (req, res, next) => {
+    if (req.user.role !== 'student') {
+        res.status(403).send({ message: 'Forbidden' });
+        return;
+    }
+    next();
+}
+
+const verifyTutor = async (req, res, next) => {
+    if (req.user.role !== 'tutor') {
+        res.status(403).send({ message: 'Forbidden' });
+        return;
+    }
+    next();
+}
+
+const verifyAdmin = async (req, res, next) => {
+    if (req.user.role !== 'admin') {
+        res.status(403).send({ message: 'Forbidden' });
+        return;
+    }
+    next();
+}
+
+const validateId = (req, res, next) => {
+  if (!ObjectId.isValid(req.params.id)) {
+    return res.status(400).send({ message: "Invalid ID" })
+  }
+  next()
+}
+
+const requireOwnId = (param) => (req, res, next) => {
+  if (req.params[param] !== req.user._id.toString()) {
+    return res.status(403).send({ message: "Forbidden" })
+  }
+  next()
+}
+
+// An allowlist prevents new private fields from leaking through public listings.
+const publicTuitionFields = {
+  title: 1, subject: 1, classLevel: 1, mode: 1, location: 1,
+  monthlyFee: 1, daysPerWeek: 1, classTimes: 1, description: 1,
+  bannerImage: 1, approvalStatus: 1, isActive: 1, createdAt: 1,
+}
+
 // Users related api
 
 // GET /users: Fetches all users.
-app.get("/users", async (req, res) => {
-  const cursor = users.find({});
+app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
+  const cursor = users.find({}, { projection: {
+    name: 1, email: 1, image: 1, role: 1, createdAt: 1, banned: 1,
+  } });
   const result = await cursor.toArray();
   res.send(result);
 });
 
 // GET /users/:id/premium : Confirm if a user is premium or not 
-app.get("/users/:id/premium", async (req, res) => {
+app.get("/users/:id/premium", verifyToken, validateId, requireOwnId("id"), async (req, res) => {
   const { id } = req.params
 
   if (!ObjectId.isValid(id)) {
@@ -72,21 +198,26 @@ app.get("/users/:id/premium", async (req, res) => {
 
 // Update the user profile
 
-app.patch("/users/:id", async (req, res) => {
+app.patch("/users/:id", verifyToken, validateId, requireOwnId("id"), async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, phone, bio, image } = req.body;
+    const fields = ["name", "phone", "bio", "image"];
+    const profile = {};
+    for (const field of fields) {
+      if (req.body[field] !== undefined) {
+        if (typeof req.body[field] !== "string" &&
+            !(field === "image" && req.body[field] === null)) {
+          return res.status(400).send({ message: `Invalid ${field}` });
+        }
+        profile[field] = req.body[field];
+      }
+    }
+    if (!Object.keys(profile).length) {
+      return res.status(400).send({ message: "No profile fields provided" });
+    }
 
     const query = { _id: new ObjectId(id) };
-
-    const updatedDoc = {
-      $set: {
-        name,
-        phone,
-        bio,
-        image,
-      },
-    };
+    const updatedDoc = { $set: profile };
 
     const result = await users.updateOne(query, updatedDoc);
 
@@ -99,7 +230,10 @@ app.patch("/users/:id", async (req, res) => {
 });
 
 // PATCH /users/:id/role: Updates the role of a user by ID.
-app.patch('/users/:id/role', async (req, res) => {
+app.patch('/users/:id/role', verifyToken, verifyAdmin, validateId, async (req, res) => {
+  if (!["student", "tutor", "admin"].includes(req.body.role)) {
+    return res.status(400).send({ message: "Invalid role" })
+  }
   const id = req.params.id;
   const query = { _id: new ObjectId(id) };
   const updatedDoc = {
@@ -113,8 +247,19 @@ app.patch('/users/:id/role', async (req, res) => {
 
 // tuitions related api
 // POST /tuitions: Creates a tuition listing using the request body.
-app.post("/tuitions", async (req, res) => {
-  const tuition = req.body;
+app.post("/tuitions", verifyToken, verifyTutor, async (req, res) => {
+  const { title, subject, classLevel, mode, location, monthlyFee, daysPerWeek,
+    classTimes, description, bannerImage, isActive } = req.body;
+  const tuition = {
+    title, subject, classLevel, mode, location, monthlyFee, daysPerWeek,
+    classTimes, description, bannerImage,
+    isActive: typeof isActive === "boolean" ? isActive : true,
+    tutorId: req.user._id.toString(),
+    tutorName: req.user.name,
+    tutorEmail: req.user.email,
+    approvalStatus: "pending",
+    createdAt: new Date().toISOString(),
+  };
   const result = await tuitions.insertOne(tuition);
   res.send(result);
 });
@@ -163,7 +308,7 @@ app.get("/tuitions", async (req, res) => {
     const page = Math.min(requestedPage, totalPages)
 
     const result = await tuitions
-      .find(query)
+      .find(query, { projection: publicTuitionFields })
       .sort({ createdAt: sort === "oldest" ? 1 : -1 })
       .skip((page - 1) * PAGE_SIZE)
       .limit(PAGE_SIZE)
@@ -183,16 +328,34 @@ app.get("/tuitions", async (req, res) => {
 })
 
 // GET /tuitions/:id: Fetches one tuition listing by ID.
-app.get("/tuitions/:id", async (req, res) => {
+app.get("/tuitions/:id", validateId, async (req, res) => {
   const { id } = req.params;
-  const result = await tuitions.findOne({
-    _id: new ObjectId(id),
-  });
+  const result = await tuitions.findOne(
+    { _id: new ObjectId(id), approvalStatus: "approved", isActive: true },
+    { projection: publicTuitionFields }
+  );
+  if (!result) return res.status(404).send({ message: "Tuition not found" });
   res.send(result);
 });
 
+app.get("/tuitions/:id/mentor", verifyToken, validateId, async (req, res) => {
+  const tuition = await tuitions.findOne(
+    { _id: new ObjectId(req.params.id), approvalStatus: "approved", isActive: true },
+    { projection: { tutorId: 1 } }
+  )
+  if (!tuition || !ObjectId.isValid(tuition.tutorId)) {
+    return res.status(404).send({ message: "Mentor not found" })
+  }
+  const mentor = await users.findOne(
+    { _id: new ObjectId(tuition.tutorId) },
+    { projection: { _id: 0, name: 1, image: 1, email: 1, phone: 1, bio: 1 } }
+  )
+  if (!mentor) return res.status(404).send({ message: "Mentor not found" })
+  res.send(mentor)
+})
+
 // GET /tuitions/tutor/:tutorId: Fetches a tutor's listings, newest first.
-app.get("/tuitions/tutor/:tutorId", async (req, res) => {
+app.get("/tuitions/tutor/:tutorId", verifyToken, verifyTutor, requireOwnId("tutorId"), async (req, res) => {
   try {
     const result = await tuitions
       .find({ tutorId: req.params.tutorId })
@@ -209,10 +372,13 @@ app.get("/tuitions/tutor/:tutorId", async (req, res) => {
 })
 
 // PATCH /tuitions/:id/active: Updates a listing's active availability.
-app.patch("/tuitions/:id/active", async (req, res) => {
+app.patch("/tuitions/:id/active", verifyToken, verifyTutor, validateId, async (req, res) => {
   try {
+    if (typeof req.body.isActive !== "boolean") {
+      return res.status(400).send({ message: "isActive must be a boolean" })
+    }
     const result = await tuitions.updateOne(
-      { _id: new ObjectId(req.params.id) },
+      { _id: new ObjectId(req.params.id), tutorId: req.user._id.toString() },
       { $set: { isActive: req.body.isActive } }
     )
 
@@ -225,7 +391,7 @@ app.patch("/tuitions/:id/active", async (req, res) => {
 })
 
 // PATCH /tuitions/:id/details: Updates a listing's location, fee, schedule, mode, image, and description.
-app.patch("/tuitions/:id/details", async (req, res) => {
+app.patch("/tuitions/:id/details", verifyToken, verifyTutor, validateId, async (req, res) => {
   try {
     const {
       location,
@@ -236,8 +402,17 @@ app.patch("/tuitions/:id/details", async (req, res) => {
       description,
     } = req.body
 
+    if (typeof location !== "string" || !location.trim() ||
+        typeof description !== "string" || description.trim().length < 20 ||
+        typeof bannerImage !== "string" ||
+        !Number.isFinite(monthlyFee) || monthlyFee <= 0 ||
+        !Number.isInteger(daysPerWeek) || daysPerWeek < 1 || daysPerWeek > 7 ||
+        !["Online", "Offline"].includes(mode)) {
+      return res.status(400).send({ message: "Invalid tuition details" })
+    }
+
     const result = await tuitions.updateOne(
-      { _id: new ObjectId(req.params.id) },
+      { _id: new ObjectId(req.params.id), tutorId: req.user._id.toString() },
       {
         $set: {
           location,
@@ -259,15 +434,14 @@ app.patch("/tuitions/:id/details", async (req, res) => {
 })
 
 
-// PATCH /tuitions/:id: Updates approval status when the request body specifies the admin role.
-app.patch("/tuitions/:id", async (req, res) => {
+// PATCH /tuitions/:id: Updates approval status as an admin.
+app.patch("/tuitions/:id", verifyToken, verifyAdmin, validateId, async (req, res) => {
   try {
-    const { role, approvalStatus } = req.body;
+    const { approvalStatus } = req.body;
 
-    // Check admin
-    if (role !== "admin") {
-      return res.status(403).send({
-        message: "Only admin can update tuition status.",
+    if (!["pending", "approved", "rejected"].includes(approvalStatus)) {
+      return res.status(400).send({
+        message: "Invalid approval status.",
       });
     }
 
@@ -292,7 +466,7 @@ app.patch("/tuitions/:id", async (req, res) => {
 
 // GET /admin/tuitions: Fetches listings with class, subject, mode, and approval filters and sorting.
 
-app.get("/admin/tuitions", async (req, res) => {
+app.get("/admin/tuitions", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const {
       classLevel = "",
@@ -330,10 +504,11 @@ app.get("/admin/tuitions", async (req, res) => {
 })
 
 // DELETE /tuitions/:id: Deletes a tuition listing by ID.
-app.delete("/tuitions/:id", async (req, res) => {
+app.delete("/tuitions/:id", verifyToken, verifyTutor, validateId, async (req, res) => {
   try {
     const result = await tuitions.deleteOne({
       _id: new ObjectId(req.params.id),
+      tutorId: req.user._id.toString(),
     })
 
     res.send(result)
@@ -374,9 +549,33 @@ async function getApplicationCounts(query) {
 }
 
 // POST /applications: Submits an application and rejects duplicate applications for the same tuition.
-app.post("/applications", async (req, res) => {
+app.post("/applications", verifyToken, verifyStudent, async (req, res) => {
   try {
-    const application = req.body
+    const { tuitionId, phone, preferredSchedule, learningNote } = req.body
+    if (typeof tuitionId !== "string" || !ObjectId.isValid(tuitionId)) {
+      return res.status(400).send({ message: "Invalid tuition ID." })
+    }
+    const tuition = await tuitions.findOne({
+      _id: new ObjectId(tuitionId), approvalStatus: "approved", isActive: true,
+    })
+    if (!tuition) return res.status(404).send({ message: "Tuition not found." })
+    const application = {
+      tuitionId: tuition._id.toString(),
+      applicantId: req.user._id.toString(),
+      applicantName: req.user.name,
+      applicantEmail: req.user.email,
+      tutorId: tuition.tutorId,
+      tutorName: tuition.tutorName,
+      tutorEmail: tuition.tutorEmail,
+      tuitionTitle: tuition.title,
+      bannerImage: tuition.bannerImage,
+      subject: tuition.subject,
+      classLevel: tuition.classLevel,
+      monthlyFee: tuition.monthlyFee,
+      phone, preferredSchedule, learningNote,
+      status: "pending",
+      createdAt: new Date().toISOString(),
+    }
     const result = await applications.insertOne(application)
 
     res.send(result)
@@ -394,7 +593,7 @@ app.post("/applications", async (req, res) => {
 })
 
 // GET /applications/student/:applicantId: Fetches a student's applications with search, status filtering, and counts.
-app.get("/applications/student/:applicantId", async (req, res) => {
+app.get("/applications/student/:applicantId", verifyToken, verifyStudent, requireOwnId("applicantId"), async (req, res) => {
   try {
     const query = {
       applicantId: req.params.applicantId,
@@ -441,7 +640,7 @@ app.get("/applications/student/:applicantId", async (req, res) => {
 })
 
 // GET /applications/tutor/:tutorId: Fetches a tutor's applications with search, status filtering, and counts.
-app.get("/applications/tutor/:tutorId", async (req, res) => {
+app.get("/applications/tutor/:tutorId", verifyToken, verifyTutor, requireOwnId("tutorId"), async (req, res) => {
   try {
     const query = {
       tutorId: req.params.tutorId,
@@ -487,7 +686,7 @@ app.get("/applications/tutor/:tutorId", async (req, res) => {
 })
 
 // PATCH /applications/:id/status: Sets an application status to accepted or rejected.
-app.patch("/applications/:id/status", async (req, res) => {
+app.patch("/applications/:id/status", verifyToken, verifyTutor, validateId, async (req, res) => {
   try {
     const { status } = req.body
 
@@ -497,8 +696,19 @@ app.patch("/applications/:id/status", async (req, res) => {
       })
     }
 
+    const application = await applications.findOne({
+      _id: new ObjectId(req.params.id), tutorId: req.user._id.toString(),
+    })
+    if (!application || !ObjectId.isValid(application.tuitionId)) {
+      return res.status(404).send({ message: "Application not found." })
+    }
+    const tuition = await tuitions.findOne({
+      _id: new ObjectId(application.tuitionId), tutorId: req.user._id.toString(),
+    })
+    if (!tuition) return res.status(404).send({ message: "Application not found." })
+
     const result = await applications.updateOne(
-      { _id: new ObjectId(req.params.id) },
+      { _id: application._id, tutorId: req.user._id.toString() },
       { $set: { status } }
     )
 
@@ -512,10 +722,11 @@ app.patch("/applications/:id/status", async (req, res) => {
 })
 
 // DELETE /applications/:id: Cancels an application only if its status is pending.
-app.delete("/applications/:id", async (req, res) => {
+app.delete("/applications/:id", verifyToken, verifyStudent, validateId, async (req, res) => {
   try {
     const result = await applications.deleteOne({
       _id: new ObjectId(req.params.id),
+      applicantId: req.user._id.toString(),
       status: "pending",
     })
 
@@ -530,18 +741,17 @@ app.delete("/applications/:id", async (req, res) => {
 
 // Saved tuitions api route 
 // POST /saved-tuitions: Saves a tuition for a student or reports that it was already saved.
-app.post("/saved-tuitions", async (req, res) => {
+app.post("/saved-tuitions", verifyToken, verifyStudent, async (req, res) => {
   try {
-    const { studentId, tuitionId } = req.body
+    const { tuitionId } = req.body
+    const studentId = req.user._id.toString()
 
     if (
-      typeof studentId !== "string" ||
-      !studentId.trim() ||
       typeof tuitionId !== "string" ||
       !ObjectId.isValid(tuitionId)
     ) {
       return res.status(400).json({
-        message: "Student ID and valid tuition ID are required.",
+        message: "A valid tuition ID is required.",
       })
     }
 
@@ -581,7 +791,7 @@ app.post("/saved-tuitions", async (req, res) => {
 })
 
 // GET /saved-tuitions/student/:studentId: Fetches a student's saved tuitions and their listing details.
-app.get("/saved-tuitions/student/:studentId", async (req, res) => {
+app.get("/saved-tuitions/student/:studentId", verifyToken, verifyStudent, requireOwnId("studentId"), async (req, res) => {
   try {
     const bookmarks = await savedTuitions
       .find({ studentId: req.params.studentId })
@@ -614,10 +824,11 @@ app.get("/saved-tuitions/student/:studentId", async (req, res) => {
 })
 
 // DELETE /saved-tuitions/:id: Removes a saved tuition by bookmark ID.
-app.delete("/saved-tuitions/:id", async (req, res) => {
+app.delete("/saved-tuitions/:id", verifyToken, verifyStudent, validateId, async (req, res) => {
   try {
     const result = await savedTuitions.deleteOne({
       _id: new ObjectId(req.params.id),
+      studentId: req.user._id.toString(),
     })
 
     res.send(result)
@@ -632,7 +843,7 @@ app.delete("/saved-tuitions/:id", async (req, res) => {
 
 // Get all payments data
 
-app.get("/payments", async (req, res) => {
+app.get("/payments", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const transactions = await payments
       .find()
@@ -649,7 +860,7 @@ app.get("/payments", async (req, res) => {
 // Prevent duplicate payment records.
 await payments.createIndex({ sessionId: 1 }, { unique: true })
 
-app.post("/payments/checkout-verify", async (req, res) => {
+app.post("/payments/checkout-verify", verifyToken, async (req, res) => {
   const { sessionId } = req.body
 
   if (!sessionId) {
@@ -669,13 +880,31 @@ app.post("/payments/checkout-verify", async (req, res) => {
       })
     }
 
-    const { userId, role } = session.metadata
+    const { userId, role, plan } = session.metadata || {}
 
     if (!ObjectId.isValid(userId) || !["student", "tutor"].includes(role)) {
       return res.status(400).send({
         success: false,
         message: "Invalid payment information",
       })
+    }
+
+    if (userId !== req.user._id.toString()) {
+      return res.status(403).send({ success: false, message: "Forbidden" })
+    }
+
+    const expectedPrice = role === "student"
+      ? process.env.STRIPE_STUDENT_PRICE_ID
+      : process.env.STRIPE_TUTOR_PRICE_ID
+    if (!expectedPrice) {
+      console.error("Stripe price ID is not configured for", role)
+      return res.status(500).send({ success: false, message: "Payment configuration error" })
+    }
+    const lineItems = await stripe.checkout.sessions.listLineItems(sessionId, { limit: 2 })
+    if (role !== req.user.role || plan !== "pro" || session.mode !== "payment" ||
+        lineItems.has_more || lineItems.data.length !== 1 ||
+        lineItems.data[0].price?.id !== expectedPrice || lineItems.data[0].quantity !== 1) {
+      return res.status(400).send({ success: false, message: "Invalid payment plan" })
     }
 
     const user = await users.findOne({ _id: new ObjectId(userId) })
