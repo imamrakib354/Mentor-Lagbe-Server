@@ -33,19 +33,21 @@ const payments = database.collection("payments");
 const savedTuitions = database.collection("savedTuitions")
 
 
+// GET /: Returns a simple server response.
 app.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
 // Users related api
 
+// GET /users: Fetches all users.
 app.get("/users", async (req, res) => {
   const cursor = users.find({});
   const result = await cursor.toArray();
   res.send(result);
 });
 
-// Users related api
+// GET /users: Duplicate route that also fetches all users.
 
 app.get("/users", async (req, res) => {
   const cursor = users.find({});
@@ -53,6 +55,7 @@ app.get("/users", async (req, res) => {
   res.send(result);
 });
 
+// PATCH /users/:id/role: Updates the role of a user by ID.
 app.patch('/users/:id/role', async (req, res) => {
   const id = req.params.id;
   const query = { _id: new ObjectId(id) };
@@ -66,6 +69,7 @@ app.patch('/users/:id/role', async (req, res) => {
 })
 
 // tuitions related api
+// POST /tuitions: Creates a tuition listing using the request body.
 app.post("/tuitions", async (req, res) => {
   const tuition = req.body;
   const result = await tuitions.insertOne(tuition);
@@ -74,6 +78,7 @@ app.post("/tuitions", async (req, res) => {
 
 const PAGE_SIZE = 6
 
+// GET /tuitions: Fetches a page of approved, active listings with search, filters, and sorting.
 app.get("/tuitions", async (req, res) => {
   try {
     const {
@@ -134,6 +139,7 @@ app.get("/tuitions", async (req, res) => {
   }
 })
 
+// GET /tuitions/:id: Fetches one tuition listing by ID.
 app.get("/tuitions/:id", async (req, res) => {
   const { id } = req.params;
   const result = await tuitions.findOne({
@@ -142,6 +148,7 @@ app.get("/tuitions/:id", async (req, res) => {
   res.send(result);
 });
 
+// GET /tuitions/tutor/:tutorId: Fetches a tutor's listings, newest first.
 app.get("/tuitions/tutor/:tutorId", async (req, res) => {
   try {
     const result = await tuitions
@@ -158,6 +165,7 @@ app.get("/tuitions/tutor/:tutorId", async (req, res) => {
   }
 })
 
+// PATCH /tuitions/:id/active: Updates a listing's active availability.
 app.patch("/tuitions/:id/active", async (req, res) => {
   try {
     const result = await tuitions.updateOne(
@@ -173,7 +181,42 @@ app.patch("/tuitions/:id/active", async (req, res) => {
   }
 })
 
+// PATCH /tuitions/:id/details: Updates a listing's location, fee, schedule, mode, image, and description.
+app.patch("/tuitions/:id/details", async (req, res) => {
+  try {
+    const {
+      location,
+      monthlyFee,
+      daysPerWeek,
+      mode,
+      bannerImage,
+      description,
+    } = req.body
 
+    const result = await tuitions.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      {
+        $set: {
+          location,
+          monthlyFee,
+          daysPerWeek,
+          mode,
+          bannerImage,
+          description,
+        },
+      }
+    )
+
+    res.send(result)
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to update tuition details.",
+    })
+  }
+})
+
+
+// PATCH /tuitions/:id: Updates approval status when the request body specifies the admin role.
 app.patch("/tuitions/:id", async (req, res) => {
   try {
     const { role, approvalStatus } = req.body;
@@ -204,7 +247,7 @@ app.patch("/tuitions/:id", async (req, res) => {
   }
 });
 
-// Get api for admin filtering 
+// GET /admin/tuitions: Fetches listings with class, subject, mode, and approval filters and sorting.
 
 app.get("/admin/tuitions", async (req, res) => {
   try {
@@ -243,6 +286,21 @@ app.get("/admin/tuitions", async (req, res) => {
   }
 })
 
+// DELETE /tuitions/:id: Deletes a tuition listing by ID.
+app.delete("/tuitions/:id", async (req, res) => {
+  try {
+    const result = await tuitions.deleteOne({
+      _id: new ObjectId(req.params.id),
+    })
+
+    res.send(result)
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to delete tuition.",
+    })
+  }
+})
+
 // applications related api 
 await applications.createIndex(
   { tuitionId: 1, applicantId: 1 },
@@ -272,6 +330,7 @@ async function getApplicationCounts(query) {
   }
 }
 
+// POST /applications: Submits an application and rejects duplicate applications for the same tuition.
 app.post("/applications", async (req, res) => {
   try {
     const application = req.body
@@ -291,6 +350,7 @@ app.post("/applications", async (req, res) => {
   }
 })
 
+// GET /applications/student/:applicantId: Fetches a student's applications with search, status filtering, and counts.
 app.get("/applications/student/:applicantId", async (req, res) => {
   try {
     const query = {
@@ -337,6 +397,7 @@ app.get("/applications/student/:applicantId", async (req, res) => {
   }
 })
 
+// GET /applications/tutor/:tutorId: Fetches a tutor's applications with search, status filtering, and counts.
 app.get("/applications/tutor/:tutorId", async (req, res) => {
   try {
     const query = {
@@ -382,6 +443,7 @@ app.get("/applications/tutor/:tutorId", async (req, res) => {
   }
 })
 
+// PATCH /applications/:id/status: Sets an application status to accepted or rejected.
 app.patch("/applications/:id/status", async (req, res) => {
   try {
     const { status } = req.body
@@ -406,8 +468,25 @@ app.patch("/applications/:id/status", async (req, res) => {
   }
 })
 
+// DELETE /applications/:id: Cancels an application only if its status is pending.
+app.delete("/applications/:id", async (req, res) => {
+  try {
+    const result = await applications.deleteOne({
+      _id: new ObjectId(req.params.id),
+      status: "pending",
+    })
+
+    res.send(result)
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to cancel application.",
+    })
+  }
+})
+
 
 // Saved tuitions api route 
+// POST /saved-tuitions: Saves a tuition for a student or reports that it was already saved.
 app.post("/saved-tuitions", async (req, res) => {
   try {
     const { studentId, tuitionId } = req.body
@@ -458,6 +537,7 @@ app.post("/saved-tuitions", async (req, res) => {
   }
 })
 
+// GET /saved-tuitions/student/:studentId: Fetches a student's saved tuitions and their listing details.
 app.get("/saved-tuitions/student/:studentId", async (req, res) => {
   try {
     const bookmarks = await savedTuitions
@@ -486,6 +566,21 @@ app.get("/saved-tuitions/student/:studentId", async (req, res) => {
     console.error(error)
     res.status(500).json({
       message: "Failed to load saved tuitions.",
+    })
+  }
+})
+
+// DELETE /saved-tuitions/:id: Removes a saved tuition by bookmark ID.
+app.delete("/saved-tuitions/:id", async (req, res) => {
+  try {
+    const result = await savedTuitions.deleteOne({
+      _id: new ObjectId(req.params.id),
+    })
+
+    res.send(result)
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to remove saved tuition.",
     })
   }
 })
