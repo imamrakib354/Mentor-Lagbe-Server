@@ -2,6 +2,9 @@ import express from "express";
 import cors from "cors";
 import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
+import Stripe from 'stripe';
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -47,13 +50,25 @@ app.get("/users", async (req, res) => {
   res.send(result);
 });
 
-// GET /users: Duplicate route that also fetches all users.
+// GET /users/:id/premium : Confirm if a user is premium or not 
+app.get("/users/:id/premium", async (req, res) => {
+  const { id } = req.params
 
-app.get("/users", async (req, res) => {
-  const cursor = users.find({});
-  const result = await cursor.toArray();
-  res.send(result);
-});
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).send({ message: "Invalid user ID" })
+  }
+
+  const user = await users.findOne(
+    { _id: new ObjectId(id) },
+    { projection: { premium: 1 } }
+  )
+
+  if (!user) {
+    return res.status(404).send({ message: "User not found" })
+  }
+
+  res.send({ premium: user.premium === true })
+})
 
 // PATCH /users/:id/role: Updates the role of a user by ID.
 app.patch('/users/:id/role', async (req, res) => {
@@ -581,6 +596,104 @@ app.delete("/saved-tuitions/:id", async (req, res) => {
   } catch (error) {
     res.status(500).send({
       message: "Failed to remove saved tuition.",
+    })
+  }
+})
+
+// payments related api
+
+// Get all payments data
+
+app.get("/payments", async (req, res) => {
+  try {
+    const transactions = await payments
+      .find()
+      .sort({ paidDate: -1 })
+      .toArray()
+
+    res.send(transactions)
+  } catch (error) {
+    console.error("Could not load transactions:", error)
+    res.status(500).send({ message: "Could not load transactions" })
+  }
+})
+
+// Prevent duplicate payment records.
+await payments.createIndex({ sessionId: 1 }, { unique: true })
+
+app.post("/payments/checkout-verify", async (req, res) => {
+  const { sessionId } = req.body
+
+  if (!sessionId) {
+    return res.status(400).send({
+      success: false,
+      message: "Session ID is required",
+    })
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.retrieve(sessionId)
+
+    if (session.status !== "complete" || session.payment_status !== "paid") {
+      return res.status(400).send({
+        success: false,
+        message: "Payment verification failed",
+      })
+    }
+
+    const { userId, role } = session.metadata
+
+    if (!ObjectId.isValid(userId) || !["student", "tutor"].includes(role)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid payment information",
+      })
+    }
+
+    const user = await users.findOne({ _id: new ObjectId(userId) })
+
+    if (!user) {
+      return res.status(404).send({
+        success: false,
+        message: "User not found",
+      })
+    }
+
+    const payment = {
+      sessionId,
+      userId,
+      userName: user.name,
+      userEmail: user.email,
+      role,
+      plan: role === "tutor" ? "Pro Tutor Plan" : "Pro Student Plan",
+      amount: session.amount_total,
+      currency: session.currency,
+      transactionId: session.payment_intent,
+      status: "paid",
+      paidDate: new Date(),
+    }
+
+    // Save once; refreshing the success page won't create another record.
+    await payments.updateOne(
+      { sessionId },
+      { $setOnInsert: payment },
+      { upsert: true }
+    )
+
+    await users.updateOne(
+      { _id: new ObjectId(userId) },
+      { $set: { premium: true } }
+    )
+
+    return res.send({
+      success: true,
+      message: "Payment verified and premium activated",
+    })
+  } catch (error) {
+    console.error(error)
+    return res.status(500).send({
+      success: false,
+      message: "Could not verify payment",
     })
   }
 })
