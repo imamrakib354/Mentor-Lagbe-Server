@@ -44,6 +44,7 @@ const tuitions = database.collection("tuitions");
 const applications = database.collection("applications");
 const payments = database.collection("payments");
 const savedTuitions = database.collection("savedTuitions")
+const reviews = database.collection("reviewCollection")
 
 
 // GET /: Returns a simple server response.
@@ -127,27 +128,27 @@ const verifyToken = async (req, res, next) => {
 
 // must call this middleware after verifyToken
 const verifyStudent = async (req, res, next) => {
-    if (req.user.role !== 'student') {
-        res.status(403).send({ message: 'Forbidden' });
-        return;
-    }
-    next();
+  if (req.user.role !== 'student') {
+    res.status(403).send({ message: 'Forbidden' });
+    return;
+  }
+  next();
 }
 
 const verifyTutor = async (req, res, next) => {
-    if (req.user.role !== 'tutor') {
-        res.status(403).send({ message: 'Forbidden' });
-        return;
-    }
-    next();
+  if (req.user.role !== 'tutor') {
+    res.status(403).send({ message: 'Forbidden' });
+    return;
+  }
+  next();
 }
 
 const verifyAdmin = async (req, res, next) => {
-    if (req.user.role !== 'admin') {
-        res.status(403).send({ message: 'Forbidden' });
-        return;
-    }
-    next();
+  if (req.user.role !== 'admin') {
+    res.status(403).send({ message: 'Forbidden' });
+    return;
+  }
+  next();
 }
 
 const validateId = (req, res, next) => {
@@ -175,9 +176,11 @@ const publicTuitionFields = {
 
 // GET /users: Fetches all users.
 app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
-  const cursor = users.find({}, { projection: {
-    name: 1, email: 1, image: 1, role: 1, createdAt: 1, banned: 1,
-  } });
+  const cursor = users.find({}, {
+    projection: {
+      name: 1, email: 1, image: 1, role: 1, createdAt: 1, banned: 1,
+    }
+  });
   const result = await cursor.toArray();
   res.send(result);
 });
@@ -212,7 +215,7 @@ app.patch("/users/:id", verifyToken, validateId, requireOwnId("id"), async (req,
     for (const field of fields) {
       if (req.body[field] !== undefined) {
         if (typeof req.body[field] !== "string" &&
-            !(field === "image" && req.body[field] === null)) {
+          !(field === "image" && req.body[field] === null)) {
           return res.status(400).send({ message: `Invalid ${field}` });
         }
         profile[field] = req.body[field];
@@ -409,11 +412,11 @@ app.patch("/tuitions/:id/details", verifyToken, verifyTutor, validateId, async (
     } = req.body
 
     if (typeof location !== "string" || !location.trim() ||
-        typeof description !== "string" || description.trim().length < 20 ||
-        typeof bannerImage !== "string" ||
-        !Number.isFinite(monthlyFee) || monthlyFee <= 0 ||
-        !Number.isInteger(daysPerWeek) || daysPerWeek < 1 || daysPerWeek > 7 ||
-        !["Online", "Offline"].includes(mode)) {
+      typeof description !== "string" || description.trim().length < 20 ||
+      typeof bannerImage !== "string" ||
+      !Number.isFinite(monthlyFee) || monthlyFee <= 0 ||
+      !Number.isInteger(daysPerWeek) || daysPerWeek < 1 || daysPerWeek > 7 ||
+      !["Online", "Offline"].includes(mode)) {
       return res.status(400).send({ message: "Invalid tuition details" })
     }
 
@@ -908,8 +911,8 @@ app.post("/payments/checkout-verify", verifyToken, async (req, res) => {
     }
     const lineItems = await stripe.checkout.sessions.listLineItems(sessionId, { limit: 2 })
     if (role !== req.user.role || plan !== "pro" || session.mode !== "payment" ||
-        lineItems.has_more || lineItems.data.length !== 1 ||
-        lineItems.data[0].price?.id !== expectedPrice || lineItems.data[0].quantity !== 1) {
+      lineItems.has_more || lineItems.data.length !== 1 ||
+      lineItems.data[0].price?.id !== expectedPrice || lineItems.data[0].quantity !== 1) {
       return res.status(400).send({ success: false, message: "Invalid payment plan" })
     }
 
@@ -1049,6 +1052,249 @@ app.get("/platform-stats", async (req, res) => {
     res.status(500).json({ message: "Failed to fetch platform statistics" })
   }
 })
+
+// Review and rating related apis
+
+await reviews.createIndex(
+  { tuitionId: 1, studentId: 1 },
+  { unique: true }
+);
+
+// ======================================================
+// 1. GET ALL REVIEWS (PUBLIC)
+// ======================================================
+
+app.get("/reviews/:tuitionId", async (req, res) => {
+  try {
+    const { tuitionId } = req.params;
+
+    if (!ObjectId.isValid(tuitionId)) {
+      return res.status(400).send({ message: "Invalid tuition ID" });
+    }
+
+    // Pagination
+    const requestedPage = Number(req.query.page ?? 1);
+    const page =
+      Number.isSafeInteger(requestedPage) && requestedPage > 0
+        ? requestedPage
+        : 1;
+
+    const limit = 3;
+    const skip = (page - 1) * limit;
+
+    if (!Number.isSafeInteger(skip)) {
+      return res.status(400).send({ message: "Invalid page number" });
+    }
+
+    // Sorting: newest by default
+    const sort = req.query.sort === "oldest" ? 1 : -1;
+
+    const query = {
+      tuitionId: new ObjectId(tuitionId).toString(),
+    };
+
+    // Get paginated reviews
+    const result = await reviews
+      .find(query, {
+        projection: {
+          studentName: 1,
+          rating: 1,
+          comment: 1,
+          createdAt: 1,
+        },
+      })
+      .sort({ createdAt: sort, _id: sort })
+      .skip(skip)
+      .limit(limit)
+      .toArray();
+
+    // Calculate total reviews and overall average
+    const ratings = await reviews
+      .find(query, { projection: { rating: 1 } })
+      .toArray();
+
+    const total = ratings.length;
+
+    const averageRating = total
+      ? ratings.reduce((sum, review) => sum + review.rating, 0) / total
+      : 0;
+
+    res.send({
+      reviews: result,
+      total,
+      averageRating: Number(averageRating.toFixed(1)),
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ message: "Failed to load reviews" });
+  }
+});
+
+
+// ======================================================
+// 2. GET LOGGED-IN STUDENT'S OWN REVIEW (PRIVATE)
+// ======================================================
+
+app.get(
+  "/reviews/:tuitionId/mine",
+  verifyToken,
+  verifyStudent,
+  async (req, res) => {
+    try {
+      const { tuitionId } = req.params;
+      const studentId = req.user._id.toString();
+
+      if (!ObjectId.isValid(tuitionId)) {
+        return res.status(400).send({
+          message: "Invalid tuition ID",
+        });
+      }
+
+      const review = await reviews.findOne(
+        {
+          tuitionId: new ObjectId(tuitionId).toString(),
+          studentId,
+        },
+        {
+          projection: {
+            studentName: 1,
+            rating: 1,
+            comment: 1,
+            createdAt: 1,
+          },
+        }
+      );
+
+      res.json(review);
+    } catch (error) {
+      console.error(error);
+      res.status(500).send({
+        message: "Failed to load your review",
+      });
+    }
+  }
+);
+
+
+// ======================================================
+// 3. POST REVIEW (PRIVATE)
+// ======================================================
+
+app.post("/reviews", verifyToken, verifyStudent, async (req, res) => {
+  try {
+    const { tuitionId, rating, comment } = req.body;
+    const studentId = req.user._id.toString();
+
+    // Validate input
+    if (
+      typeof tuitionId !== "string" ||
+      !ObjectId.isValid(tuitionId) ||
+      !Number.isInteger(rating) ||
+      rating < 1 ||
+      rating > 5 ||
+      typeof comment !== "string" ||
+      !comment.trim() ||
+      comment.trim().length > 500
+    ) {
+      return res.status(400).send({
+        message: "Invalid review data",
+      });
+    }
+
+    // Find tuition to get tutorId
+    const tuition = await tuitions.findOne({
+      _id: new ObjectId(tuitionId),
+    });
+
+    if (!tuition) {
+      return res.status(404).send({
+        message: "Tuition not found",
+      });
+    }
+
+    // Check accepted application
+    const application = await applications.findOne({
+      tuitionId: tuition._id.toString(),
+      applicantId: studentId,
+      status: "accepted",
+    });
+
+    if (!application) {
+      return res.status(403).send({
+        message: "Only accepted students can submit reviews",
+      });
+    }
+
+    // Create review
+    const review = {
+      tuitionId: tuition._id.toString(),
+      tutorId: tuition.tutorId,
+      studentId,
+      studentName: req.user.name,
+      rating,
+      comment: comment.trim(),
+      createdAt: new Date(),
+    };
+
+    const result = await reviews.insertOne(review);
+
+    res.status(201).send(result);
+  } catch (error) {
+    // Duplicate review
+    if (error.code === 11000) {
+      return res.status(409).send({
+        message: "You have already reviewed this tuition",
+      });
+    }
+
+    console.error(error);
+    res.status(500).send({
+      message: "Failed to add review",
+    });
+  }
+});
+
+
+// ======================================================
+// 4. DELETE OWN REVIEW (PRIVATE)
+// ======================================================
+
+app.delete("/reviews/:id", verifyToken, verifyStudent, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const studentId = req.user._id.toString();
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid review ID",
+      });
+    }
+
+    // Delete only the authenticated student's review
+    const result = await reviews.deleteOne({
+      _id: new ObjectId(id),
+      studentId,
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).send({
+        message: "Review not found",
+      });
+    }
+
+    res.send({
+      message: "Review deleted successfully",
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({
+      message: "Failed to delete review",
+    });
+  }
+});
 
 
 if (!process.env.VERCEL) {
